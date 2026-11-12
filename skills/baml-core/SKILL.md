@@ -92,7 +92,7 @@ Every `baml run` and `baml test` records what ran, and `baml query` reads it bac
 
 - **Spans and timing.** A recording keeps a call as a *span* or as *timing*. A span is one row of the `spans` table, with its parent, times, status and captured values. A timing call adds to its function's totals in `profiler` and keeps no row and no values. AI functions are spans by default, and other functions are timing. A root call and every `spawn` are spans of type `future`.
 - **Make a function a span** with a directive above its declaration: `/// baml:$trace=trace.span`. `trace.empty_span` (a span without values), `trace.timing` and `trace.hidden` are the other choices.
-- **Or choose per call.** Every function takes a hidden `$trace` parameter, passed by name: `fee(paid, $trace = trace.span())`. `trace.context(distinct_id = …, metadata = {…})` labels the call and everything it runs; `spans` serves the labels as `context_distinct_id` and `context_metadata['phase']`. Builders chain: `trace.context(…).span()`.
+- **Or choose per call.** Every function takes a hidden `$trace` parameter, passed by name: `fee(paid, $trace = trace.span())`. `trace.context(distinct_id = …, metadata = {…})` labels the call and everything it runs; `spans` and `logs` serve the labels as `context_distinct_id` and `context_metadata['phase']`. Builders chain: `trace.context(…).span()`.
 - **What a span captures.** `trace.span()` captures the call's inputs, output and error (`input_args`, `output_value`, `error_value`). `inputs = false`, `output = false` or `error = false` leaves one out, and `trace.empty_span()` leaves out all three. Any other span records the error it ends with when it throws or panics, whether or not it captures anything else. A failed future, a failed root call included, carries the error that escaped it. A timing call captures nothing.
 - **Keep a value out** with `@trace.redact` on a class field or `@@trace.redact` on a class. A recording holds a marker in its place wherever the value would be captured.
 
@@ -167,6 +167,10 @@ baml query "SELECT baml_code(type_args['T']) FROM spans WHERE span_id = '<span_i
 # 3. The model's raw HTTP response, from the request under the call.
 baml query "SELECT network_event_values FROM spans
   WHERE span_type = 'network_span' AND parent_span_id = '<span_id>' ORDER BY start_time"
+# 4. What ran under a span logged (log.info/debug/warn/error), with the line that logged it.
+#    span_id is the innermost recorded span; filter on future_id for a whole future's logs.
+baml query "SELECT timestamp, level, event_name, data, function_name, source_file, line
+  FROM logs WHERE span_id = '<span_id>' ORDER BY timestamp"
 ```
 
 `baml_code` returns a block whose value is the recorded type: bind it with `let type`. Replay the model's reply with `F@parse`, so the test never calls the model:
