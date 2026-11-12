@@ -155,7 +155,7 @@ To add cross-cutting behavior (metering, caching, replay, budgets), write a clas
 
 ### Debugging a recorded call
 
-Runs record their calls. AI functions record their inputs, output, error and type arguments by default, and every failed span and future records its error (see [Tracing](#tracing)). `baml query` answers SQL over them (`baml query --schema` lists the tables). To turn a failing call into a test:
+Runs record their calls. AI functions record their inputs, output, error and type arguments by default, and every failed span and future records its error (see [Tracing](#tracing)). `baml query` answers SQL over them (`baml query --schema` lists the tables). Results keep the stored spellings, which are what SQL filters on. When you put results in front of a person, in a report or a dashboard, show the labels and column headings that `baml query --schema` lists under "Labels for people": a `status` of `user_error` is shown as Failed, a `future` as Task, `context_distinct_id` as User, and a duration in ms or s, not nanoseconds. `--format json` carries the same labels on each column. To turn a failing call into a test:
 
 ```bash
 # 1. Find the call.
