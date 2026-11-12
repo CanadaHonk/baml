@@ -804,9 +804,15 @@ fn wrapper_command_boundaries_capture_operational_values() {
     // independent of saved credentials, embedded release keys and ambient context.
     let local = |program: &Path| {
         let mut command = Command::new(program);
+        command.env_clear();
+        // Windows needs SystemRoot for side-by-side assemblies; preserve only
+        // OS process-launch settings, never ambient BAML or Boundary settings.
+        for key in ["PATH", "SystemRoot", "WINDIR", "PATHEXT", "TEMP", "TMP"] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
         command
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", &home)
             .env("USERPROFILE", &home)
             .env("BAML_HOME", home.join(".baml"))
@@ -1060,13 +1066,16 @@ function main() -> void {
     assert_eq!(selected[2]["$class"], "user.Selection");
     assert_eq!(selected[2]["selector"]["$class"], "user.PathSelector");
     assert_eq!(
-        selected[2]["selector"]["value"],
-        child.display().to_string()
+        std::fs::canonicalize(selected[2]["selector"]["value"].as_str().unwrap()).unwrap(),
+        std::fs::canonicalize(&child).unwrap()
     );
     assert_eq!(selected[2]["source"], "$BAML_TOOLCHAIN");
     let child_result = span("delegated", "user.run_toolchain");
     assert_eq!(child_result[0], "return");
-    assert_eq!(child_result[1]["binary"], child.display().to_string());
+    assert_eq!(
+        std::fs::canonicalize(child_result[1]["binary"].as_str().unwrap()).unwrap(),
+        std::fs::canonicalize(&child).unwrap()
+    );
     assert_eq!(
         child_result[1]["args"],
         json!(["check", "delegated-input-sentinel"])
