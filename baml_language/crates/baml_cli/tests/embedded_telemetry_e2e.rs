@@ -922,11 +922,10 @@ function main() -> void {
     }
     #[cfg(unix)]
     {
-        // Close stdout's peer before spawning, keeping stderr available for
-        // diagnostics. This remains a panic, unlike ordinary user errors and
-        // sys.exit cancellation.
-        let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
-        drop(reader);
+        // An unconnected datagram stdout fails with EDESTADDRREQ, keeping stderr
+        // available for diagnostics. Avoid BrokenPipe: its separate structured
+        // error handling must not affect this panic-capture assertion.
+        let writer = std::os::unix::net::UnixDatagram::unbound().unwrap();
         let output = local(&binary)
             .arg("--help")
             .env("BAML_TELEMETRY", "medium")
