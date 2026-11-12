@@ -614,9 +614,11 @@ async fn capture_flags(program: &Program) {
                             (inputs == Some(true)).then_some(&args),
                         );
                         if fail {
+                            // A span records the error it ends with unless
+                            // the call declined it with `error = false`.
                             recording.assert_error_capture(
                                 done.value_cas_id.as_ref(),
-                                (error == Some(true)).then_some(&returned),
+                                (error != Some(false)).then_some(&returned),
                             );
                         } else {
                             recording.assert_capture(
@@ -1386,10 +1388,14 @@ async fn exceptional_completion(program: &Program) {
                 outcome,
             );
             let expected = one_field_instance(program, class, &fields["message"], false, &[]);
-            recording.assert_capture(
-                done.value_cas_id.as_ref(),
-                (error == Some(true)).then_some(&expected),
-            );
+            // A panic is the span's own failure: it is recorded unless the
+            // call declined it. A cancellation is recorded only on request.
+            let recorded = if cancel {
+                error == Some(true)
+            } else {
+                error != Some(false)
+            };
+            recording.assert_capture(done.value_cas_id.as_ref(), recorded.then_some(&expected));
         }
     }
 }

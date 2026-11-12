@@ -8,6 +8,9 @@ enum Mode {
 /// Per-invocation capture requests: true requests capture; false and null add
 /// no request. Applicable function-policy requests still capture; false is not
 /// a privacy veto. Requests do not propagate to descendant invocations.
+/// A span that ends with a thrown error or a panic records that error by
+/// default: `error = false` leaves it out, and `error = true` also records
+/// the value a cancelled invocation ended with.
 class Capture {
     inputs: bool?,
     output: bool?,
