@@ -5,7 +5,7 @@ class WrapperInvocation {
     project: string,
 
     function selection(self) -> Selection {
-        let active = self.selection_impl() catch (error) {
+        let active = self.selection_impl($trace = trace.span(inputs = false, output = true, error = true)) catch (error) {
             _ => {
                 telemetry_event(self.telemetry, "wrapper_resolution", fields = { "outcome": "failure" });
                 throw error;
@@ -313,7 +313,7 @@ class WrapperInvocation {
         baml.io.println(`baml wrapper ${wrapper_version()}`);
         let binary = self.selection().ensure_installed(telemetry = self.telemetry);
         WrapperTelemetry.finish(self.telemetry);
-        let result = baml.sys.run(binary, args = [flag], env = { "BAML_CLI_ALLOW_DIRECT": "1" });
+        let result = run_toolchain(binary, [flag], $trace = trace.span(inputs = true, output = true, error = true));
         baml.sys.exit(result.exit_code)
     }
 
@@ -340,9 +340,11 @@ class WrapperInvocation {
             help(command = args.at(1) ?? "");
             return null;
         }
-        let command = management_command(args);
-        command.preflight(self, $trace = trace.span(inputs = false, output = false, error = false));
-        command.execute(self, $trace = trace.span(inputs = false, output = false, error = false))
+        // The parsed command contains operational options, without the invocation
+        // telemetry sender passed to preflight and execute.
+        let command = management_command(args, $trace = trace.span(inputs = true, output = true, error = true));
+        command.preflight(self, $trace = trace.span(inputs = false, output = true, error = true));
+        command.execute(self, $trace = trace.span(inputs = false, output = true, error = true))
     }
 
     function install_selector(self) -> string {

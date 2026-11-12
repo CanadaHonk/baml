@@ -103,9 +103,10 @@ function main() -> void throws never {
         // scheduling another helper that immediately retries the same rejection.
         if (!internal_helper) { WrapperTelemetry.finish(telemetry, executable = flush_executable); }
     }
-    // Retain command outcomes without recording arguments or error payloads.
+    // Capture outcomes, excluding the PostHog sender passed as telemetry.
+    // The parser below captures operational argv before telemetry is attached.
     flush_executable
-        = dispatch(telemetry, $trace = trace.span(inputs = false, output = false, error = false)) catch (error) {
+        = dispatch(telemetry, $trace = trace.span(inputs = false, output = true, error = true)) catch (error) {
             _ => {
                 telemetry_event(telemetry, "wrapper_unhandled_error", fields = { "event_kind": "unhandled_error" });
                 baml.io.eprintln(`error: ${error_message(error)}`);
@@ -129,7 +130,7 @@ function dispatch(telemetry: WrapperTelemetry?) -> string? {
     }
     let paths = WrapperInvocation.parse(
         forwarded,
-        $trace = trace.span(inputs = false, output = false, error = false),
+        $trace = trace.span(inputs = true, output = true, error = true),
     );
     let args = paths.args;
     paths.telemetry = telemetry;
@@ -163,7 +164,7 @@ function dispatch(telemetry: WrapperTelemetry?) -> string? {
             ensure(args.length() == 1, "unexpected self-update arguments");
             return WrapperUpdater.update(
                 telemetry = paths.telemetry,
-                $trace = trace.span(inputs = false, output = false, error = false),
+                $trace = trace.span(inputs = false, output = true, error = true),
             );
         },
         _ => {},
@@ -173,12 +174,18 @@ function dispatch(telemetry: WrapperTelemetry?) -> string? {
     let warned = active.warn_if_outdated();
     let refresh = spawn { active.refresh_channel() };
     WrapperTelemetry.finish(paths.telemetry);
-    let result = baml.sys.run(binary, args = forwarded, env = { "BAML_CLI_ALLOW_DIRECT": "1" });
+    let result = run_toolchain(binary, forwarded, $trace = trace.span(inputs = true, output = true, error = true));
     await refresh;
     if (!warned) {
         active.warn_if_outdated();
     }
     baml.sys.exit(result.exit_code)
+}
+
+// Keep the child result before sys.exit unwinds dispatch as cancellation. Standard
+// streams still inherit; the result contains exit status, not captured CLI output.
+function run_toolchain(binary: string, args: string[]) -> baml.sys.ProcessOutput {
+    baml.sys.run(binary, args = args, env = { "BAML_CLI_ALLOW_DIRECT": "1" })
 }
 
 function describe_selector(value: string) -> string {

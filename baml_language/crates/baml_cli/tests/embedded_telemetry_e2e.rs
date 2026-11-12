@@ -789,7 +789,7 @@ async fn wrapper_build_embeds_named_api_key_for_both_release_variants() {
 }
 
 #[test]
-fn wrapper_command_boundaries_record_spans_without_values() {
+fn wrapper_command_boundaries_capture_operational_values() {
     let built = common::ensure_built();
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let temp = tempfile::tempdir().unwrap();
@@ -800,7 +800,25 @@ fn wrapper_command_boundaries_record_spans_without_values() {
     } else {
         "wrapper"
     });
-    let output = Command::new(if cfg!(windows) { "python" } else { "python3" })
+    // Explicit local delivery and an isolated home keep every negative fixture
+    // independent of saved credentials, embedded release keys and ambient context.
+    let local = |program: &Path| {
+        let mut command = Command::new(program);
+        command
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("BAML_HOME", home.join(".baml"))
+            .env("BOUNDARY_API_KEY", "local")
+            .env("BAML_CLI_ALLOW_DIRECT", "1")
+            .env("DEV_BAML_CLI_DISABLE_AGENT_DETECTION", "1")
+            .env("BAML_TELEMETRY", "off")
+            .env("DO_NOT_TRACK", "1")
+            .current_dir(temp.path());
+        command
+    };
+    let output = local(Path::new(if cfg!(windows) { "python" } else { "python3" }))
         .arg(repo.join("baml_language/wrapper/build"))
         .arg("--cli")
         .arg(&built.baml_cli)
@@ -808,89 +826,303 @@ fn wrapper_command_boundaries_record_spans_without_values() {
         .arg(&built.baml_pack_host)
         .arg("--output")
         .arg(&binary)
-        .env("BAML_HOME", home.join(".baml"))
-        .env("BAML_TELEMETRY", "off")
-        .env("DO_NOT_TRACK", "1")
         .output()
         .unwrap();
     succeeded(&output);
 
-    for (scenario, args, success) in [
-        ("help", vec!["--help"], true),
-        ("update", vec!["toolchain", "update"], false),
-        ("self-update", vec!["self-update"], false),
-        ("parse-error", vec!["--project"], false),
-        ("helper", vec!["__flush-wrapper-telemetry"], true),
+    // A portable child fixture returns a known nonzero result without treating
+    // it as a thrown wrapper error, and leaves stdout/stderr inherited.
+    let child_project = temp.path().join("child");
+    std::fs::create_dir(&child_project).unwrap();
+    common::write_project(
+        &child_project,
+        r#"
+function main() -> void {
+    baml.io.println("delegated-output-sentinel");
+    baml.sys.exit(7)
+}
+"#,
+    );
+    let child = temp.path().join(if cfg!(windows) {
+        "child.exe"
+    } else {
+        "child-bin"
+    });
+    succeeded(
+        &local(&built.baml_cli)
+            .args(["pack", "main", "--from"])
+            .arg(&child_project)
+            .arg("--output")
+            .arg(&child)
+            .output()
+            .unwrap(),
+    );
+    let missing = temp
+        .path()
+        .join("missing-project-sentinel")
+        .display()
+        .to_string();
+    let sentinel_project = temp.path().join("project-sentinel");
+    std::fs::create_dir(&sentinel_project).unwrap();
+    let sentinel_project = sentinel_project.display().to_string();
+    for (scenario, args, code) in [
+        ("help", vec!["--project", &sentinel_project, "--help"], 0),
+        ("parse-error", vec!["--project", "--sentinel"], 1),
+        ("project-error", vec!["--project", &missing, "check"], 1),
+        (
+            "selection-error",
+            vec!["check", "selection-input-sentinel"],
+            1,
+        ),
+        (
+            "command-error",
+            vec!["toolchain", "status", "--sentinel-option"],
+            1,
+        ),
+        ("preflight-error", vec!["toolchain", "update"], 1),
+        ("execute-error", vec!["toolchain", "uninstall", "0.0.77"], 1),
+        ("list", vec!["toolchain", "list"], 0),
+        ("self-update", vec!["self-update"], 1),
+        ("helper", vec!["__flush-wrapper-telemetry"], 0),
+        ("delegated", vec!["check", "delegated-input-sentinel"], 7),
+        ("high", vec!["--help"], 0),
+        ("on", vec!["--help"], 0),
+        ("off", vec!["--help"], 0),
     ] {
-        let output = Command::new(&binary)
+        let toolchain = match scenario {
+            "delegated" => child.to_str().unwrap(),
+            "list" => "0.0.78",
+            _ => "invalid-version-sentinel",
+        };
+        let level = match scenario {
+            "high" | "on" | "off" => scenario,
+            _ => "medium",
+        };
+        let output = local(&binary)
             .args(args)
-            .current_dir(temp.path())
-            .env("BAML_HOME", home.join(".baml"))
-            .env("BAML_TELEMETRY", "medium")
+            .env("BAML_TELEMETRY", level)
             .env(
                 "BAML_CONTEXT",
                 json!({"metadata": {"scenario": scenario}}).to_string(),
             )
-            .env("BAML_TOOLCHAIN", "invalid-version")
+            .env("BAML_TOOLCHAIN", toolchain)
             .env("BAML_MANIFEST_BASE_URL", "invalid://release-source")
-            .env_remove("BOUNDARY_API_KEY")
-            .env("DO_NOT_TRACK", "1")
             .output()
             .unwrap();
-        assert_eq!(output.status.success(), success, "{scenario}: {output:?}");
+        assert_eq!(output.status.code(), Some(code), "{scenario}: {output:?}");
+        if scenario == "delegated" {
+            assert!(String::from_utf8_lossy(&output.stdout).contains("delegated-output-sentinel"));
+        }
     }
-
+    #[cfg(unix)]
+    {
+        // Close stdout's peer before spawning, keeping stderr available for
+        // diagnostics. This remains a panic, unlike ordinary user errors and
+        // sys.exit cancellation.
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(reader);
+        let output = local(&binary)
+            .arg("--help")
+            .env("BAML_TELEMETRY", "medium")
+            .env(
+                "BAML_CONTEXT",
+                json!({"metadata": {"scenario": "panic"}}).to_string(),
+            )
+            .stdout(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+                writer,
+            )))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+    }
     let query = |sql: &str| {
-        let output = Command::new(&built.baml_cli)
+        let output = local(&built.baml_cli)
             .args(["query", "--local", "--format", "json", "--from"])
             .arg(&home)
             .arg(sql)
-            .env("BAML_HOME", home.join(".baml"))
-            .env("BAML_CLI_ALLOW_DIRECT", "1")
-            .env("BAML_TELEMETRY", "off")
-            .env("DO_NOT_TRACK", "1")
             .output()
             .unwrap();
         succeeded(&output);
         serde_json::from_slice::<Value>(&output.stdout).unwrap()["rows"].take()
     };
+    let spans = query("SELECT context_metadata['scenario'], span_name, status, input_args, output_value, error_value,
+        baml_value_state(input_args), baml_value_state(output_value), baml_value_state(error_value)
+        FROM spans WHERE span_type = 'function'");
+    let span = |scenario: &str, name: &str| {
+        let rows: Vec<_> = spans
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row[0] == scenario && row[1] == name)
+            .collect();
+        assert_eq!(rows.len(), 1, "{scenario}/{name}: {rows:?}");
+        Value::Array(rows[0].as_array().unwrap()[2..].to_vec())
+    };
+    let parsed = span("help", "user.WrapperInvocation.parse");
+    assert_eq!(parsed[0], "return");
     assert_eq!(
-        query(
-            "SELECT context_metadata['scenario'], span_name, status FROM spans
-               WHERE span_type = 'function' AND span_name IN (
-                 'user.WrapperInvocation.parse', 'user.WrapperUpdater.update',
-                 'user.<(user.UpdateCommand as user.ManagementCommand)>.preflight', 'user.dispatch')
-               ORDER BY context_metadata['scenario'], span_name"
+        parsed[1]["raw"],
+        json!(["--project", sentinel_project, "--help"])
+    );
+    assert_eq!(parsed[2]["$class"], "user.WrapperInvocation");
+    assert_eq!(parsed[2]["args"], json!(["--help"]));
+    assert_eq!(
+        std::fs::canonicalize(parsed[2]["project"].as_str().unwrap()).unwrap(),
+        std::fs::canonicalize(&sentinel_project).unwrap()
+    );
+    assert_eq!(parsed[2]["telemetry"], Value::Null);
+    assert_eq!(parsed[5], "present");
+    let returned = span("help", "user.dispatch");
+    assert_eq!(returned[0], "return");
+    assert_eq!(returned[2], Value::Null);
+    assert_eq!(returned[5], "null", "a returned null is captured");
+    for (scenario, name, class, message) in [
+        (
+            "parse-error",
+            "user.WrapperInvocation.parse",
+            "baml.errors.InvalidArgument",
+            "--project requires a path",
         ),
-        json!([
-            ["help", "user.WrapperInvocation.parse", "return"],
-            ["help", "user.dispatch", "return"],
-            ["helper", "user.dispatch", "return"],
-            ["parse-error", "user.WrapperInvocation.parse", "user_error"],
-            ["parse-error", "user.dispatch", "user_error"],
-            ["self-update", "user.WrapperInvocation.parse", "return"],
-            ["self-update", "user.WrapperUpdater.update", "user_error"],
-            ["self-update", "user.dispatch", "user_error"],
-            [
-                "update",
-                "user.<(user.UpdateCommand as user.ManagementCommand)>.preflight",
-                "user_error"
-            ],
-            ["update", "user.WrapperInvocation.parse", "return"],
-            ["update", "user.dispatch", "user_error"],
-        ])
+        (
+            "project-error",
+            "user.WrapperInvocation.parse",
+            "baml.errors.InvalidArgument",
+            "missing-project-sentinel",
+        ),
+        (
+            "selection-error",
+            "user.WrapperInvocation.selection_impl",
+            "user.InvalidToolchainVersion",
+            "invalid-version-sentinel",
+        ),
+        (
+            "command-error",
+            "user.management_command",
+            "user.UnexpectedManagementArgument",
+            "",
+        ),
+        (
+            "preflight-error",
+            "user.<(user.UpdateCommand as user.ManagementCommand)>.preflight",
+            "user.InvalidToolchainVersion",
+            "invalid-version-sentinel",
+        ),
+        (
+            "execute-error",
+            "user.<(user.UninstallCommand as user.ManagementCommand)>.execute",
+            "baml.errors.InvalidArgument",
+            "toolchain 0.0.77 is not installed",
+        ),
+        (
+            "self-update",
+            "user.WrapperUpdater.update",
+            "baml.errors.InvalidArgument",
+            "HTTPS",
+        ),
+    ] {
+        let failed = span(scenario, name);
+        assert_eq!(failed[0], "user_error", "{scenario}: {failed}");
+        assert_eq!(
+            failed[3]["$class"], "baml.errors.Context",
+            "{scenario}: {failed}"
+        );
+        assert_eq!(failed[3]["error"]["$class"], class, "{scenario}: {failed}");
+        assert!(
+            failed[3]["error"].to_string().contains(message),
+            "{scenario}: {failed}"
+        );
+        assert_eq!(failed[6], "present");
+        assert_eq!(span(scenario, "user.dispatch")[0], "user_error");
+    }
+    let command_error = span("command-error", "user.management_command");
+    assert_eq!(
+        command_error[1]["args"],
+        json!(["status", "--sentinel-option"])
+    );
+    assert_eq!(command_error[3]["error"]["argument"], "--sentinel-option");
+    let command = span("execute-error", "user.management_command");
+    assert_eq!(command[2]["$class"], "user.UninstallCommand");
+    assert_eq!(command[2]["version"]["$class"], "user.ManagedVersion");
+    assert_eq!(command[2]["version"]["value"], "0.0.77");
+    let executed = span(
+        "list",
+        "user.<(user.ListCommand as user.ManagementCommand)>.execute",
+    );
+    assert_eq!(executed[0], "return");
+    assert_eq!(executed[5], "null");
+    assert_eq!(
+        span("list", "user.dispatch")[0],
+        "return",
+        "recovered preflight failures stay recovered"
+    );
+    let selected = span("delegated", "user.WrapperInvocation.selection_impl");
+    assert_eq!(selected[0], "return");
+    assert_eq!(selected[2]["$class"], "user.Selection");
+    assert_eq!(selected[2]["selector"]["$class"], "user.PathSelector");
+    assert_eq!(
+        selected[2]["selector"]["value"],
+        child.display().to_string()
+    );
+    assert_eq!(selected[2]["source"], "$BAML_TOOLCHAIN");
+    let child_result = span("delegated", "user.run_toolchain");
+    assert_eq!(child_result[0], "return");
+    assert_eq!(child_result[1]["binary"], child.display().to_string());
+    assert_eq!(
+        child_result[1]["args"],
+        json!(["check", "delegated-input-sentinel"])
+    );
+    assert_eq!(child_result[2]["$class"], "baml.sys.ProcessOutput");
+    assert_eq!(child_result[2]["exit_code"], 7);
+    assert_eq!(child_result[2]["signal"], Value::Null);
+    let exited = span("delegated", "user.dispatch");
+    assert_eq!(exited[0], "cancel_error");
+    assert_eq!(exited[5], "no_value", "sys.exit does not return an output");
+    assert_eq!(exited[6], "present");
+    assert_eq!(exited[3]["error"]["$class"], "baml.panics.Exit");
+    assert_eq!(exited[3]["error"]["code"], 7);
+    // Sender/plumbing objects must never become inputs; parser outputs are
+    // captured before attaching telemetry, and command results contain no sender.
+    assert_eq!(query("SELECT COUNT(*) FROM spans WHERE span_type = 'function'
+        AND span_name IN ('user.dispatch', 'user.WrapperUpdater.update', 'user.WrapperInvocation.selection_impl',
+          'user.<(user.ListCommand as user.ManagementCommand)>.execute',
+          'user.<(user.UpdateCommand as user.ManagementCommand)>.preflight')
+        AND baml_value_state(input_args) = 'present'"), json!([[0]]));
+    assert_eq!(
+        query("SELECT COUNT(*) FROM processes WHERE context_metadata['scenario'] = 'off'"),
+        json!([[0]])
     );
     assert_eq!(
         query(
-            "SELECT COUNT(*) FROM spans WHERE span_type = 'function' AND span_name IN (
-                 'user.WrapperInvocation.parse', 'user.WrapperUpdater.update',
-                 'user.<(user.UpdateCommand as user.ManagementCommand)>.preflight', 'user.dispatch')
-               AND (baml_value_state(input_args) = 'present'
-                 OR baml_value_state(output_value) = 'present'
-                 OR baml_value_state(error_value) = 'present')"
+            "SELECT COUNT(*) FROM spans WHERE context_metadata['scenario'] = 'helper'
+        AND span_name = 'user.WrapperInvocation.parse'"
         ),
         json!([[0]])
     );
+    let on = span("on", "user.WrapperInvocation.parse");
+    assert_eq!(on[1]["raw"], json!(["--help"]));
+    assert_eq!(
+        on[5], "present",
+        "on retains the packed medium default and explicit capture"
+    );
+    #[cfg(unix)]
+    {
+        let panicked = span("panic", "user.dispatch");
+        assert_eq!(panicked[0], "panic_error");
+        assert_eq!(
+            panicked[3]["error"]["$class"],
+            "baml.panics.HostUnavailable"
+        );
+        assert_eq!(panicked[6], "present");
+        assert_eq!(panicked[5], "no_value");
+    }
+    let automatic = span("high", "user.root_help");
+    assert_eq!(automatic[0], "return");
+    assert_eq!(automatic[4], "no_value");
+    assert_eq!(
+        automatic[5], "no_value",
+        "high promotes spans without enabling value capture"
+    );
+    assert_eq!(automatic[6], "no_value");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
