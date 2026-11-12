@@ -12,7 +12,7 @@ BCS retains explicit spans with operational values at these wrapper boundaries:
 | Management `preflight` / `execute`, `WrapperUpdater.update`, `dispatch` | Returned results (including null) and error payloads. Self-update help bypasses the updater. |
 | `run_toolchain` | Selected binary path, forwarded arguments, the child process result (exit code and signal), and launch errors. Version reporting uses this boundary too. Standard streams still inherit, so the result does not contain child stdout/stderr content. |
 
-Forwarded argument strings are captured as supplied, including delegated tokens after `--`. A delegated target's `redact` declarations do not redact these separate wrapper argv strings.
+Forwarded argument strings are captured as supplied, including delegated tokens after `--`. Arguments can contain secrets, which BCS records as supplied. A delegated target's `redact` declarations do not redact these separate wrapper argv strings.
 
 Inputs containing telemetry senders are excluded from dispatch, selection, management preflight/execution and self-update spans. Parser results are captured before telemetry is attached; internal PostHog sender payloads and embedded ingestion credentials are not captured through these inputs. Other utility functions retain the existing automatic policy. Explicit capture applies only to the requested invocation, not its descendants; `high` promotes automatic function spans without enabling their argument/result/error capture. In packed wrapper builds, `BAML_TELEMETRY=on` retains the baked recording level (normally medium); it does not request value capture. `BAML_TELEMETRY=off` disables recording, including these explicit spans.
 
